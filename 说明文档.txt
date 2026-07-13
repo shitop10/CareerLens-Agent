@@ -1,0 +1,2 @@
+CareerLens Agent	Agentic RAG求职文档分析助手，支持JD匹配、简历诊断、模拟面试，Milvus向量+BM25混合检索+RRF融合。	LangChain, FastAPI, Vue 3, Milvus, RRF, Qwen	
+“GitHub - zby020203/CareerLens-Agent”

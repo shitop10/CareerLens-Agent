@@ -1,0 +1,15 @@
+岗位名称：大模型算法工程师 / 算法实习生
+
+岗位职责：
+1. 参与企业知识库问答、检索增强生成 RAG、Agent 工具调用等大模型应用的算法设计与落地。
+2. 负责文档解析、文本切分、Embedding 表征、向量召回、BM25 关键词召回、重排序和答案生成链路优化。
+3. 构建离线评测集，评估检索 Hit Rate、MRR、生成 Faithfulness、Answer Relevancy 等指标。
+4. 参与大模型 SFT、LoRA/QLoRA 微调、偏好数据构造和效果对比实验。
+5. 与工程团队合作完成 FastAPI 服务、前端交互、日志监控和部署验证。
+
+任职要求：
+1. 熟悉 Python、PyTorch、Transformers、LangChain 或 LlamaIndex。
+2. 了解 RAG 基本流程，能解释语义检索、关键词检索、重排序、上下文压缩和幻觉控制。
+3. 有向量数据库 Milvus、Chroma、FAISS 或 Elasticsearch 使用经验。
+4. 具备基本实验设计能力，能用指标和消融实验说明方案有效性。
+5. 有完整项目经历者优先，包括数据处理、模型调用、接口服务、前端展示和实验报告。
