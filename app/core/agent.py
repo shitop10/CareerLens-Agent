@@ -46,6 +46,19 @@ class AgentRun:
         for item in self.memory_updates:
             yield f"[记忆更新] {item}\n"
 
+    def reasoning_events(self) -> list[dict]:
+        """结构化思考过程事件（供 SSE reasoning 通道使用）。"""
+        events = [
+            {"type": "status", "content": "Agent 正在识别任务意图..."},
+            {"type": "status", "content": f"Agent 已选择工作模式：{self.mode}"},
+            {"type": "status", "content": "Agent 已生成自动任务计划..."},
+            *[{"type": "plan", "content": f"- {step}"} for step in self.plan],
+            *[{"type": "tool", "title": item.title, "content": item.content} for item in self.tool_results],
+            {"type": "status", "content": "Agent 正在进行反思与自我修正..."},
+            {"type": "reflection", "content": self.reflection},
+        ]
+        return events
+
 
 class LongTermMemory:
     """Append-only memory store for reusable career insights."""
