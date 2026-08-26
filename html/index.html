@@ -579,6 +579,25 @@
             $("stage").innerHTML = '<div class="empty" style="padding:60px;text-align:center"><h2>开始新的分析</h2><p class="muted">选择快捷提问或输入你的问题</p></div>';
         }
 
+        async function loadHistory(uuid) {
+            try {
+                const res = await (await api("GET", "/chat/" + uuid)).json();
+                const messages = res.data || [];
+                if (messages.length === 0) {
+                    $("stage").innerHTML = '<div class="empty" style="padding:60px;text-align:center"><h2>暂无消息</h2><p class="muted">这是空会话，发送第一条消息开始分析</p></div>';
+                    return;
+                }
+                messages.forEach(m => {
+                    appendMessage("user", m.user_input);
+                    appendMessage("ai", m.raw_output || "");
+                });
+                $("stage").scrollTop = $("stage").scrollHeight;
+            } catch (e) {
+                console.error("加载历史失败:", e);
+                $("stage").innerHTML = '<div class="empty" style="padding:60px;text-align:center"><h2>历史加载失败</h2><p class="muted">' + escapeHtml(e.message) + '</p></div>';
+            }
+        }
+
         function render() {
             if (!state.loggedIn) return;
             const current = modes.find(([key]) => key === state.mode) || modes[1];
@@ -808,6 +827,7 @@
                 state.currentSessionUuid = sessionDiv.dataset.sid;
                 state.mode = "match";
                 render();
+                loadHistory(state.currentSessionUuid);
             }
         });
 
