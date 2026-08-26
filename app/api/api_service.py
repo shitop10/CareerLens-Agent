@@ -179,6 +179,7 @@ async def save_chat_history(s_id: int, user_in: str, raw_out: str):
 async def start_event():
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await asyncio.to_thread(get_kb_service().ensure_active_metadata)
 
 
 @app.post("/auth/register")
@@ -280,6 +281,36 @@ async def upload_knowledge(file: UploadFile = File(...), session_id: str = Cooki
             "chars": len(text),
         },
     }
+
+
+@app.get("/knowledge/files")
+async def list_knowledge_files(session_id: str = Cookie(None)):
+    if not session_id:
+        raise HTTPException(status_code=401, detail="请先登录")
+    files = await asyncio.to_thread(get_kb_service().list_files)
+    return {"status": "success", "data": files}
+
+
+@app.post("/knowledge/files/toggle")
+async def toggle_knowledge_file(filename: str = Body(..., embed=True), session_id: str = Cookie(None)):
+    if not session_id:
+        raise HTTPException(status_code=401, detail="请先登录")
+    try:
+        result = await asyncio.to_thread(get_kb_service().toggle_file, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"status": "success", "data": result}
+
+
+@app.delete("/knowledge/files")
+async def delete_knowledge_file(filename: str, session_id: str = Cookie(None)):
+    if not session_id:
+        raise HTTPException(status_code=401, detail="请先登录")
+    try:
+        result = await asyncio.to_thread(get_kb_service().delete_file, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"status": "success", "data": result}
 
 
 @app.get("/chat/{session_uuid}")

@@ -40,6 +40,7 @@ class VectorStoreService:
             res = collection.query(
                 query_embeddings=[query_vector],
                 n_results=k,
+                where={"active": True},
                 include=["documents", "metadatas", "distances"]
             )
 

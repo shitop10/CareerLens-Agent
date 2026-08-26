@@ -20,12 +20,23 @@ def check_md5(md5_str):
         open(config.md5_path, 'w', encoding="utf-8").close()
         return False
     with open(config.md5_path, 'r', encoding="utf-8") as f:
-        return md5_str in [line.strip() for line in f.readlines()]
+        lines = [line.strip() for line in f.readlines()]
+    return md5_str in [line.split("|")[-1] for line in lines]
 
 
-def save_md5(md5):
+def save_md5(filename, md5_str):
     with open(config.md5_path, 'a', encoding="utf-8") as f:
-        f.write(md5 + '\n')
+        f.write(f"{filename}|{md5_str}\n")
+
+
+def remove_md5(filename):
+    if not os.path.exists(config.md5_path):
+        return
+    with open(config.md5_path, 'r', encoding="utf-8") as f:
+        lines = f.readlines()
+    remaining = [line for line in lines if not line.startswith(f"{filename}|")]
+    with open(config.md5_path, 'w', encoding="utf-8") as f:
+        f.writelines(remaining)
 
 
 class KnowledgeBaseService:
@@ -78,8 +89,10 @@ class KnowledgeBaseService:
 
             existing_count = collection.count()
             ids = [f"doc_{existing_count + i}" for i in range(len(knowledge_chunks))]
+            from datetime import datetime
+            uploaded_at = datetime.now().isoformat(timespec="seconds")
             metadatas = [
-                {"filename": filename, "chunk_index": i}
+                {"filename": filename, "chunk_index": i, "active": True, "uploaded_at": uploaded_at}
                 for i in range(len(knowledge_chunks))
             ]
 
@@ -97,8 +110,93 @@ class KnowledgeBaseService:
 
         self.bm25_corpus.extend(knowledge_chunks)
         self._save_bm25_corpus()
-        save_md5(md5_hex)
+        save_md5(filename, md5_hex)
         return "【成功】内容已载入知识库"
+
+    # ========== 材料管理 ==========
+
+    def _get_collection(self):
+        try:
+            return self.chroma_client.get_collection(name=config.COLLECTION_NAME)
+        except Exception:
+            return None
+
+    def ensure_active_metadata(self):
+        """惰性迁移：为缺少 active 字段的旧 chunk 补齐 active=True。"""
+        collection = self._get_collection()
+        if collection is None or collection.count() == 0:
+            return
+        res = collection.get(include=["metadatas"])
+        missing_ids = [i for i, md in zip(res["ids"], res["metadatas"]) if "active" not in md]
+        if missing_ids:
+            collection.update(
+                ids=missing_ids,
+                metadatas=[{"active": True}] * len(missing_ids)
+            )
+            logger.info(f"[Migrate] 已为 {len(missing_ids)} 个旧 chunk 补齐 active=True 元数据")
+
+    def list_files(self):
+        """按 filename 聚合知识库文件：chunk 数 / active / 上传时间。"""
+        collection = self._get_collection()
+        if collection is None or collection.count() == 0:
+            return []
+        res = collection.get(include=["metadatas"])
+        agg = {}
+        for md in res["metadatas"]:
+            fname = md.get("filename", "未知来源")
+            item = agg.setdefault(fname, {
+                "filename": fname, "chunks": 0, "active": True, "uploaded_at": ""
+            })
+            item["chunks"] += 1
+            if not md.get("active", True):
+                item["active"] = False
+            if md.get("uploaded_at") and not item["uploaded_at"]:
+                item["uploaded_at"] = md["uploaded_at"]
+        return sorted(agg.values(), key=lambda x: x["uploaded_at"], reverse=True)
+
+    def toggle_file(self, filename):
+        """切换文件的启用/停用状态（active 取反），并重建 BM25 语料。"""
+        collection = self._get_collection()
+        if collection is None:
+            raise ValueError(f"文件不存在: {filename}")
+        res = collection.get(where={"filename": filename}, include=["metadatas"])
+        if not res["ids"]:
+            raise ValueError(f"文件不存在: {filename}")
+        new_active = not bool(res["metadatas"][0].get("active", True))
+        new_metadatas = []
+        for md in res["metadatas"]:
+            m = dict(md)
+            m["active"] = new_active
+            new_metadatas.append(m)
+        collection.update(ids=res["ids"], metadatas=new_metadatas)
+        self._rebuild_bm25_corpus()
+        return {"filename": filename, "active": new_active, "chunks": len(res["ids"])}
+
+    def delete_file(self, filename):
+        """删除文件全部 chunks，清理 MD5 记录并重建 BM25 语料。"""
+        collection = self._get_collection()
+        if collection is None:
+            raise ValueError(f"文件不存在: {filename}")
+        res = collection.get(where={"filename": filename}, include=["metadatas"])
+        if not res["ids"]:
+            raise ValueError(f"文件不存在: {filename}")
+        collection.delete(where={"filename": filename})
+        remove_md5(filename)
+        self._rebuild_bm25_corpus()
+        logger.info(f"[Manage] 已删除文件 {filename}（{len(res['ids'])} 个 chunk）")
+        return {"filename": filename, "deleted_chunks": len(res["ids"])}
+
+    def _rebuild_bm25_corpus(self):
+        """从 Chroma 全量重建 BM25 语料（仅 active 文档），保持与检索一致。"""
+        collection = self._get_collection()
+        if collection is None or collection.count() == 0:
+            self.bm25_corpus = []
+            self._save_bm25_corpus()
+            return
+        res = collection.get(where={"active": True}, include=["documents"])
+        self.bm25_corpus = list(res["documents"])
+        self._save_bm25_corpus()
+        logger.info(f"[Manage] BM25 语料已重建（{len(self.bm25_corpus)} chunks）")
 
 
 if __name__ == '__main__':

@@ -227,6 +227,35 @@
             font-size: 12px; font-weight: 800;
         }
         .material strong, .session strong { display: block; font-size: 14px; }
+        .material-info { flex: 1; min-width: 0; }
+        .material-info .meta { display: block; font-size: 12px; }
+        .material-actions { display: flex; gap: 6px; margin-top: 8px; }
+        .mini-btn {
+            min-height: 26px;
+            border-radius: 7px;
+            padding: 0 10px;
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--teal);
+            border: 1px solid #acd8d0;
+            background: var(--teal-soft);
+        }
+        .mini-btn.danger {
+            color: var(--danger);
+            border-color: #f3b9b9;
+            background: #fdf0f0;
+        }
+        .mini-btn:hover { filter: brightness(0.97); }
+        .status-badge {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 700;
+            border-radius: 999px;
+            padding: 2px 8px;
+            margin-left: 6px;
+        }
+        .status-badge.on { color: #075e56; background: var(--teal-soft); }
+        .status-badge.off { color: var(--muted); background: #eef1f5; }
         .todo { margin: 18px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
         .todo li {
             border: 1px solid var(--line);
@@ -512,13 +541,61 @@
         function renderMaterials() {
             $("fileBadge").textContent = `${state.files.length} 份资料`;
             $("materialList").innerHTML = state.files.length === 0
-                ? '<p class="meta">暂无已上传资料</p>'
-                : state.files.map(([type, name, desc]) => `
+                ? '<p class="meta">暂无已上传资料，去「资料上传」页添加</p>'
+                : state.files.map(f => {
+                    const ext = (f.filename.split(".").pop() || "FILE").toUpperCase().slice(0, 3);
+                    const badge = f.active
+                        ? '<span class="status-badge on">启用</span>'
+                        : '<span class="status-badge off">停用</span>';
+                    const meta = `${f.chunks} chunks · ${f.uploaded_at ? f.uploaded_at.slice(5, 16) : "较早"}`;
+                    return `
                     <div class="material">
-                        <div class="filetype">${type}</div>
-                        <div><strong>${escapeHtml(name)}</strong><span class="meta">${escapeHtml(desc)}</span></div>
-                    </div>
-                `).join("");
+                        <div class="filetype">${escapeHtml(ext)}</div>
+                        <div class="material-info">
+                            <strong>${escapeHtml(f.filename)}${badge}</strong>
+                            <span class="meta">${escapeHtml(meta)}</span>
+                            <div class="material-actions">
+                                <button class="mini-btn" data-toggle-fn="${escapeHtml(f.filename)}">${f.active ? "停用" : "启用"}</button>
+                                <button class="mini-btn danger" data-del-fn="${escapeHtml(f.filename)}">删除</button>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join("");
+        }
+
+        async function refreshFiles() {
+            try {
+                const res = await (await api("GET", "/knowledge/files")).json();
+                state.files = res.data || [];
+            } catch (e) {
+                console.error("获取材料列表失败:", e);
+            }
+            renderMaterials();
+        }
+
+        async function toggleFile(filename) {
+            try {
+                const res = await api("POST", "/knowledge/files/toggle", { filename });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || "切换失败");
+                refreshFiles();
+            } catch (e) {
+                alert("切换失败: " + e.message);
+            }
+        }
+
+        async function deleteFile(filename) {
+            if (!confirm(`确定删除材料「${filename}」？该内容将从知识库移除。`)) return;
+            try {
+                const res = await api("DELETE", "/knowledge/files?filename=" + encodeURIComponent(filename));
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.detail || "删除失败");
+                }
+                refreshFiles();
+            } catch (e) {
+                alert("删除失败: " + e.message);
+            }
         }
 
         function renderSessions() {
@@ -581,8 +658,7 @@
                     const data = await res.json();
                     if (data.status === "success") {
                         $("uploadStatus").textContent = data.message;
-                        state.files.unshift([file.name.split(".").pop().toUpperCase().slice(0, 3), file.name, "已入库"]);
-                        renderMaterials();
+                        refreshFiles();
                     } else {
                         $("uploadStatus").textContent = "上传失败";
                     }
@@ -630,6 +706,7 @@
             renderModes("topModes", "mode-chip");
             renderMaterials();
             renderSessions();
+            refreshFiles();
             if (state.mode === "upload") renderUpload();
             else renderChat();
         }
@@ -859,6 +936,16 @@
                 state.currentSessionUuid = "";
                 state.mode = "match";
                 render();
+            }
+            const toggleBtn = event.target.closest("[data-toggle-fn]");
+            if (toggleBtn) {
+                toggleFile(toggleBtn.dataset.toggleFn);
+                return;
+            }
+            const delFileBtn = event.target.closest("[data-del-fn]");
+            if (delFileBtn) {
+                deleteFile(delFileBtn.dataset.delFn);
+                return;
             }
             const delBtn = event.target.closest("[data-del-sid]");
             if (delBtn) {
