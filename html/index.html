@@ -81,8 +81,27 @@
             border-color: #acd8d0;
             font-weight: 700;
         }
-        .session { padding: 12px; }
+        .session { padding: 8px 10px; }
         .session.active { background: #f7fafc; }
+        .session-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+        .session-info { min-width: 0; }
+        .session-info strong {
+            display: block; font-size: 14px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .session-del {
+            flex: 0 0 auto;
+            width: 22px; height: 22px;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--muted);
+            font-size: 14px; line-height: 1;
+            display: none;
+            align-items: center; justify-content: center;
+            padding: 0;
+        }
+        .session:hover .session-del { display: flex; }
+        .session-del:hover { background: var(--danger); color: white; }
         .content {
             min-width: 0;
             display: grid;
@@ -510,7 +529,12 @@
             $("sessionList").innerHTML = state.sessions.map(s => {
                 const isActive = s.session_id === state.currentSessionUuid;
                 return `<div class="session${isActive ? " active" : ""}" data-sid="${s.session_id}">
-                    <strong>${escapeHtml(s.title)}</strong><span class="meta">${s.update_time || ""}</span>
+                    <div class="session-row">
+                        <div class="session-info">
+                            <strong>${escapeHtml(s.title)}</strong><span class="meta">${s.update_time || ""}</span>
+                        </div>
+                        <button class="session-del" data-del-sid="${s.session_id}" title="删除会话">×</button>
+                    </div>
                 </div>`;
             }).join("");
         }
@@ -805,6 +829,20 @@
             }
         }
 
+        async function deleteSession(uuid) {
+            if (!confirm("确定删除该会话？此操作不可恢复。")) return;
+            try {
+                await api("DELETE", "/delete/" + uuid);
+                if (state.currentSessionUuid === uuid) {
+                    state.currentSessionUuid = "";
+                    render();
+                }
+                refreshSessions();
+            } catch (e) {
+                alert("删除失败: " + e.message);
+            }
+        }
+
         document.addEventListener("click", (event) => {
             const modeBtn = event.target.closest("[data-mode]");
             if (modeBtn) {
@@ -821,6 +859,11 @@
                 state.currentSessionUuid = "";
                 state.mode = "match";
                 render();
+            }
+            const delBtn = event.target.closest("[data-del-sid]");
+            if (delBtn) {
+                deleteSession(delBtn.dataset.delSid);
+                return;
             }
             const sessionDiv = event.target.closest("[data-sid]");
             if (sessionDiv) {

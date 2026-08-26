@@ -349,12 +349,23 @@ async def chat_stream(session_uuid: str = Body(..., embed=True), input_text: str
 
 
 @app.delete("/delete/{session_uuid}")
-async def delete_s(session_uuid: str, db: AsyncSession = Depends(get_db)):
+async def delete_s(session_uuid: str, session_id: str = Cookie(None), db: AsyncSession = Depends(get_db)):
+    if not session_id:
+        raise HTTPException(status_code=401, detail="未登录")
+    user_res = await db.execute(select(User).where(User.last_cookie == session_id))
+    user = user_res.scalars().first()
+    if not user:
+        raise HTTPException(status_code=401, detail="无效会话")
+
     res = await db.execute(select(ChatSession).where(ChatSession.session_uuid == session_uuid))
     target = res.scalars().first()
-    if target:
-        await db.delete(target)
-        await db.commit()
+    if not target:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if target.user_id != user.id:
+        raise HTTPException(status_code=403, detail="无权删除该会话")
+
+    await db.delete(target)
+    await db.commit()
     return {"status": "success"}
 
 
