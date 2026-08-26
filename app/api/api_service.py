@@ -82,6 +82,11 @@ def extract_upload_text(filename: str, content: bytes) -> str:
     raise HTTPException(status_code=400, detail="仅支持 txt、md、pdf 文件")
 
 
+def sse_event(event: str, data: dict) -> str:
+    """构造标准 SSE 事件帧：event 行 + data 行（JSON，中文原样输出）+ 空行。"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
 def get_rag_service():
     global rag_service
     if rag_service is None:
@@ -301,8 +306,8 @@ async def chat_stream(session_uuid: str = Body(..., embed=True), input_text: str
         current_agent = get_agent_service()
         current_rag = get_rag_service()
         agent_run = await asyncio.to_thread(current_agent.prepare, input_text)
-        for line in agent_run.status_lines():
-            yield line
+        for evt in agent_run.reasoning_events():
+            yield sse_event("reasoning", evt)
             await asyncio.sleep(0.08)
 
         agent_context = current_agent.compose_agent_context(agent_run)
@@ -311,7 +316,7 @@ async def chat_stream(session_uuid: str = Body(..., embed=True), input_text: str
         stdout_capture = io.StringIO()
         full_out = ""
 
-        yield f"[状态] Agent 正在汇总工具结果并生成最终建议...\n"
+        yield sse_event("reasoning", {"type": "status", "content": "Agent 正在汇总工具结果并生成最终建议..."})
         await asyncio.sleep(0.1)
 
         with redirect_stdout(stdout_capture):
@@ -319,28 +324,28 @@ async def chat_stream(session_uuid: str = Body(..., embed=True), input_text: str
                                                          config={"configurable": {"session_id": session_uuid}}):
                 captured_output = stdout_capture.getvalue()
                 if captured_output:
-                    yield captured_output
+                    yield sse_event("reasoning", {"type": "status", "content": captured_output})
                     stdout_capture.truncate(0)
                     stdout_capture.seek(0)
 
                 content = chunk if isinstance(chunk, str) else getattr(chunk, 'content', "")
-                if content.startswith("[状态]"):
-                    yield content
+                if not content:
                     continue
                 full_out += content
-                yield content
+                yield sse_event("answer", {"type": "token", "content": content})
 
         final_captured_output = stdout_capture.getvalue()
         if final_captured_output:
-            yield final_captured_output
+            yield sse_event("reasoning", {"type": "status", "content": final_captured_output})
 
         memory_updates = await asyncio.to_thread(current_agent.finalize, input_text, full_out, agent_run)
         for item in memory_updates:
-            yield f"\n[记忆更新] {item}\n"
+            yield sse_event("reasoning", {"type": "memory", "content": item})
+        yield sse_event("done", {})
 
         asyncio.create_task(save_chat_history(curr.id, input_text, full_out))
 
-    return StreamingResponse(event_generator(), media_type="text/plain")
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.delete("/delete/{session_uuid}")
