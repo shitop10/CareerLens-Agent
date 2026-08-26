@@ -263,6 +263,69 @@
         .login-actions { display: grid; gap: 10px; margin-top: 20px; }
         .hidden { display: none !important; }
         .agent-meta { font-size: 11px; color: var(--muted); margin: 2px 0; }
+        .reasoning-panel {
+            margin-bottom: 10px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: #f8fafc;
+            overflow: hidden;
+        }
+        .reasoning-toggle {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            background: transparent;
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 700;
+            text-align: left;
+        }
+        .reasoning-toggle:hover { background: var(--teal-soft); }
+        .reasoning-toggle .arrow {
+            display: inline-block;
+            transition: transform 0.15s;
+            font-size: 10px;
+            color: var(--muted);
+        }
+        .reasoning-toggle .arrow.open { transform: rotate(90deg); }
+        .reasoning-body {
+            border-top: 1px solid var(--line);
+            padding: 10px 14px 14px;
+            font-size: 12px;
+            color: var(--muted);
+            display: grid;
+            gap: 8px;
+        }
+        .reasoning-body.hidden { display: none; }
+        .r-line { display: flex; gap: 8px; align-items: flex-start; line-height: 1.6; }
+        .r-dot {
+            flex: 0 0 auto;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            margin-top: 6px;
+            background: #b4c2d4;
+        }
+        .r-line.plan { color: #39465a; }
+        .r-line.plan .r-dot { background: var(--blue); }
+        .r-tool {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: white;
+            padding: 8px 10px;
+        }
+        .r-tool strong { display: block; font-size: 12px; color: #075e56; margin-bottom: 3px; }
+        .r-tool .r-tool-content { color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+        .r-reflection {
+            border-left: 3px solid var(--amber);
+            background: var(--amber-soft);
+            padding: 8px 10px;
+            border-radius: 0 8px 8px 0;
+            color: var(--amber);
+            line-height: 1.6;
+        }
+        .r-memory { color: var(--teal); }
         @media (max-width: 1040px) {
             .app { grid-template-columns: 1fr; }
             .sidebar { display: none; }
@@ -540,6 +603,80 @@
             return div.querySelector(".bubble");
         }
 
+        function appendThinkingPanel() {
+            const wrap = document.createElement("div");
+            wrap.className = "message ai";
+            wrap.innerHTML = `<div class="avatar ai">CL</div>`;
+            const col = document.createElement("div");
+            col.style.cssText = "flex:1;min-width:0;";
+            wrap.appendChild(col);
+
+            const panel = document.createElement("div");
+            panel.className = "reasoning-panel";
+            const toggle = document.createElement("button");
+            toggle.className = "reasoning-toggle";
+            toggle.innerHTML = `<span class="arrow open">▶</span><span>Agent 工作流</span>`;
+            const body = document.createElement("div");
+            body.className = "reasoning-body";
+            panel.appendChild(toggle);
+            panel.appendChild(body);
+            col.appendChild(panel);
+
+            let open = true;
+            toggle.addEventListener("click", () => {
+                open = !open;
+                body.classList.toggle("hidden", !open);
+                toggle.querySelector(".arrow").classList.toggle("open", open);
+            });
+            $("stage").appendChild(wrap);
+            $("stage").scrollTop = $("stage").scrollHeight;
+            return {
+                body,
+                setCollapsed(collapsed) {
+                    open = !collapsed;
+                    body.classList.toggle("hidden", collapsed);
+                    toggle.querySelector(".arrow").classList.toggle("open", !collapsed);
+                }
+            };
+        }
+
+        function renderReasoning(panelBody, evt) {
+            const el = document.createElement("div");
+            if (evt.type === "plan") {
+                el.className = "r-line plan";
+                const dot = document.createElement("span");
+                dot.className = "r-dot";
+                const txt = document.createElement("span");
+                txt.textContent = evt.content || "";
+                el.appendChild(dot);
+                el.appendChild(txt);
+            } else if (evt.type === "tool") {
+                el.className = "r-tool";
+                el.innerHTML = `<strong>${escapeHtml(evt.title || "工具")}</strong><div class="r-tool-content">${escapeHtml(evt.content || "")}</div>`;
+            } else if (evt.type === "reflection") {
+                el.className = "r-reflection";
+                el.textContent = "反思：" + (evt.content || "");
+            } else if (evt.type === "memory") {
+                el.className = "r-line memory";
+                const dot = document.createElement("span");
+                dot.className = "r-dot";
+                const txt = document.createElement("span");
+                txt.textContent = "记忆：" + (evt.content || "");
+                el.appendChild(dot);
+                el.appendChild(txt);
+            } else {
+                el.className = "r-line status";
+                const dot = document.createElement("span");
+                dot.className = "r-dot";
+                const txt = document.createElement("span");
+                txt.textContent = evt.content || "";
+                el.appendChild(dot);
+                el.appendChild(txt);
+            }
+            panelBody.appendChild(el);
+            $("stage").scrollTop = $("stage").scrollHeight;
+        }
+
         async function sendMessage() {
             if (state.sending) return;
             const text = $("inputBox").value.trim();
@@ -562,7 +699,31 @@
             $("sendButton").textContent = "...";
             $("sendButton").disabled = true;
 
+            const thinkingCtx = appendThinkingPanel();
             const bubble = appendMessage("ai", "");
+            let answerStarted = false;
+
+            function handleSseFrame(rawFrame) {
+                let eventName = "message", dataStr = "";
+                for (const line of rawFrame.split("\n")) {
+                    if (line.startsWith("event:")) eventName = line.slice(6).trim();
+                    else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+                }
+                if (!dataStr) return;
+                let payload;
+                try { payload = JSON.parse(dataStr); } catch { return; }
+
+                if (eventName === "reasoning") {
+                    renderReasoning(thinkingCtx.body, payload);
+                } else if (eventName === "answer") {
+                    if (!answerStarted) {
+                        answerStarted = true;
+                        thinkingCtx.setCollapsed(true);
+                    }
+                    bubble.textContent += payload.content || "";
+                    $("stage").scrollTop = $("stage").scrollHeight;
+                }
+            }
 
             try {
                 const res = await api("POST", "/chat", {
@@ -571,16 +732,20 @@
                 });
                 const reader = res.body.getReader();
                 const decoder = new TextDecoder();
-                let fullText = "";
+                let buffer = "";
 
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-                    const chunk = decoder.decode(value, { stream: true });
-                    fullText += chunk;
-                    bubble.textContent = fullText;
-                    $("stage").scrollTop = $("stage").scrollHeight;
+                    buffer += decoder.decode(value, { stream: true });
+                    let idx;
+                    while ((idx = buffer.indexOf("\n\n")) >= 0) {
+                        const rawFrame = buffer.slice(0, idx);
+                        buffer = buffer.slice(idx + 2);
+                        if (rawFrame.trim()) handleSseFrame(rawFrame);
+                    }
                 }
+                if (buffer.trim()) handleSseFrame(buffer);
             } catch (e) {
                 bubble.textContent = "错误: " + e.message;
             } finally {
