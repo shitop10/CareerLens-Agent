@@ -16,7 +16,13 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import update, func, desc
-from app.core.config_data import ASYNC_DATABASE_URL, SALT_SUFFIX
+from app.core.config_data import ASYNC_DATABASE_URL, SALT_SUFFIX, PLANNER_MODE
+from app.core.agent_types import (
+    PLANNER_MODES,
+    build_metrics_event,
+    build_planner_event,
+    normalize_planner_mode,
+)
 from app.models.models import Base, User, ChatSession, ChatMessage
 from app.core.logger import logger
 import os
@@ -37,7 +43,7 @@ app.mount("/html", StaticFiles(directory=os.path.join(project_root, "html")), na
 async_engine = create_async_engine(ASYNC_DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(bind=async_engine, class_=AsyncSession, expire_on_commit=False)
 rag_service: Optional[Any] = None
-agent_service: Optional[Any] = None
+_agent_cache: dict[str, Any] = {}
 kb_service: Optional[Any] = None
 
 
@@ -95,12 +101,17 @@ def get_rag_service():
     return rag_service
 
 
-def get_agent_service():
-    global agent_service
-    if agent_service is None:
-        from app.core.agent import CareerAgentService
-        agent_service = CareerAgentService(get_rag_service())
-    return agent_service
+def get_agent_service(planner_mode: Optional[str] = None):
+    """按 planner 标识装配并缓存 Agent 实例。
+
+    两条 Planner 路线（rule / llm）各缓存一份，非法标识回落配置默认值。
+    """
+    from app.core.agent_base import build_agent_service
+
+    resolved = normalize_planner_mode(planner_mode or PLANNER_MODE)
+    if resolved not in _agent_cache:
+        _agent_cache[resolved] = build_agent_service(get_rag_service(), resolved)
+    return _agent_cache[resolved]
 
 
 def get_kb_service():
@@ -111,19 +122,60 @@ def get_kb_service():
     return kb_service
 
 
-async def save_chat_history(s_id: int, user_in: str, raw_out: str):
-    logger.info(f"[Backend] 开始处理会话 {s_id} 的后台存储任务...")
+def _split_output(raw_out: str) -> tuple[str, str]:
+    codes = re.findall(r"```[a-zA-Z0-9\+\#]*\n(.*?)\n```", raw_out, re.DOTALL)
+    code_str = "\n---\n".join(codes) if codes else ""
+    clean_text = re.sub(r"```.*?```", "", raw_out, flags=re.DOTALL).strip()
+    return clean_text, code_str
+
+
+async def persist_message(s_id: int, user_in: str, raw_out: str) -> int:
+    """先把消息落库并提交（毫秒级）。
+
+    必须在 SSE `done` 之前 await 完成：否则用户收到回答后立刻追问时，
+    下一轮的规划器读不到本轮历史，指代消解会失效（race）。
+    标题与摘要生成较慢，放到 ``enrich_message`` 里异步补写。
+    """
+    clean_text, code_str = _split_output(raw_out)
+    async with AsyncSessionLocal() as db:
+        new_msg = ChatMessage(
+            session_id=s_id,
+            user_input=user_in,
+            raw_output=raw_out,
+            output_uncode=clean_text,
+            code=code_str,
+            streamline_input=clean_text[:50],
+        )
+        db.add(new_msg)
+        await db.commit()
+        await db.refresh(new_msg)
+        return new_msg.id
+
+
+async def enrich_message(s_id: int, msg_id: int, user_in: str, raw_out: str) -> None:
+    """补写会话标题与消息摘要。慢（2 次模型调用），因此放在后台任务里。"""
+    clean_text, _ = _split_output(raw_out)
     async with AsyncSessionLocal() as db:
         try:
-            codes = re.findall(r"```[a-zA-Z0-9\+\#]*\n(.*?)\n```", raw_out, re.DOTALL)
-            code_str = "\n---\n".join(codes) if codes else ""
-            clean_text = re.sub(r"```.*?```", "", raw_out, flags=re.DOTALL).strip()
+            count_res = await db.execute(
+                select(func.count(ChatMessage.id)).where(ChatMessage.session_id == s_id)
+            )
+            is_first_message = (count_res.scalar() or 0) <= 1
 
-            count_res = await db.execute(select(func.count(ChatMessage.id)).where(ChatMessage.session_id == s_id))
-            msg_count = count_res.scalar()
+            summary = clean_text[:50]
+            try:
+                from langchain_community.chat_models import ChatTongyi
+                from langchain_core.messages import HumanMessage
+                from app.core.prompts import summary_generation_prompt
 
-            if msg_count == 0:
-                logger.info(f"[Backend] 检测到第一条消息，正在生成标题...")
+                chat_model = ChatTongyi(model="qwen-turbo")
+                s_resp = await chat_model.ainvoke([HumanMessage(
+                    content=summary_generation_prompt.format(content=clean_text))])
+                summary = s_resp.content.strip() or summary
+            except Exception as e:
+                logger.error(f"[Backend] 生成总结过程出错: {str(e)}")
+
+            if is_first_message:
                 try:
                     from langchain_community.chat_models import ChatTongyi
                     from langchain_core.messages import HumanMessage
@@ -133,46 +185,22 @@ async def save_chat_history(s_id: int, user_in: str, raw_out: str):
                     t_resp = await chat_model.ainvoke([HumanMessage(
                         content=title_generation_prompt.format(user_input=user_in))])
                     new_title = t_resp.content.strip().replace("“", "").replace("”", "").replace("标题：", "")
-
-                    stmt = (
-                        update(ChatSession)
-                        .where(ChatSession.id == s_id)
-                        .values(title=new_title)
-                    )
-                    await db.execute(stmt)
-                    logger.info(f"[Backend] 标题已成功更新为: {new_title}")
+                    if new_title:
+                        await db.execute(
+                            update(ChatSession).where(ChatSession.id == s_id).values(title=new_title)
+                        )
+                        logger.info(f"[Backend] 标题已成功更新为: {new_title}")
                 except Exception as e:
                     logger.error(f"[Backend] 标题生成过程出错: {str(e)}")
 
-            summary = ""
-            try:
-                from langchain_community.chat_models import ChatTongyi
-                from langchain_core.messages import HumanMessage
-                from app.core.prompts import summary_generation_prompt
-
-                chat_model = ChatTongyi(model="qwen-turbo")
-                s_resp = await chat_model.ainvoke([HumanMessage(content=summary_generation_prompt.format(content=clean_text))])
-                summary = s_resp.content.strip()
-            except Exception as e:
-                logger.error(f"[Backend] 生成总结过程出错: {str(e)}")
-                summary = clean_text[:50]
-
-            new_msg = ChatMessage(
-                session_id=s_id,
-                user_input=user_in,
-                raw_output=raw_out,
-                output_uncode=clean_text,
-                code=code_str,
-                streamline_input=summary
+            await db.execute(
+                update(ChatMessage).where(ChatMessage.id == msg_id).values(streamline_input=summary)
             )
-            db.add(new_msg)
-
             await db.commit()
-            logger.info(f"[Backend] 会话 {s_id} 数据存储完成。")
-
+            logger.info(f"[Backend] 会话 {s_id} 的标题与摘要补写完成。")
         except Exception as e:
             await db.rollback()
-            logger.error(f"[Backend] 存储任务发生严重错误: {str(e)}")
+            logger.error(f"[Backend] 补写标题/摘要失败: {str(e)}")
 
 
 @app.on_event("startup")
@@ -245,6 +273,12 @@ async def health():
         "project": "CareerLens",
         "retrieval": "Chroma + BM25 + RRF",
         "agent": "Planner + Tool Calling + Reflection + Memory",
+        "planner": normalize_planner_mode(PLANNER_MODE),
+        "planner_modes": list(PLANNER_MODES),
+        "planner_notes": {
+            "rule": "确定性关键词路由，零 token 消耗，plan 与 reflection 均为规则产出",
+            "llm": "LangGraph plan/execute/reflect + 模型 function calling，失败自动回退规则路线",
+        },
     }
 
 
@@ -327,6 +361,7 @@ async def get_history(session_uuid: str, session_id: str = Cookie(None), db: Asy
 
 @app.post("/chat")
 async def chat_stream(session_uuid: str = Body(..., embed=True), input_text: str = Body(..., embed=True),
+                      planner_mode: Optional[str] = Body(None, embed=True),
                       session_id: str = Cookie(None), db: AsyncSession = Depends(get_db)):
     res = await db.execute(select(ChatSession).where(ChatSession.session_uuid == session_uuid))
     curr = res.scalars().first()
@@ -334,9 +369,13 @@ async def chat_stream(session_uuid: str = Body(..., embed=True), input_text: str
         raise HTTPException(status_code=404)
 
     async def event_generator():
-        current_agent = get_agent_service()
+        current_agent = get_agent_service(planner_mode)
         current_rag = get_rag_service()
-        agent_run = await asyncio.to_thread(current_agent.prepare, input_text)
+        # 传入 session_uuid：规划器据此加载对话历史，解析「那这个呢」这类省略式追问
+        agent_run = await asyncio.to_thread(current_agent.prepare, input_text, curr.session_uuid)
+
+        # 首帧显式声明本轮由哪条路线规划，规则路线不得被展示成模型推理
+        yield sse_event("reasoning", build_planner_event(agent_run))
         for evt in agent_run.reasoning_events():
             yield sse_event("reasoning", evt)
             await asyncio.sleep(0.08)
@@ -372,9 +411,21 @@ async def chat_stream(session_uuid: str = Body(..., embed=True), input_text: str
         memory_updates = await asyncio.to_thread(current_agent.finalize, input_text, full_out, agent_run)
         for item in memory_updates:
             yield sse_event("reasoning", {"type": "memory", "content": item})
+
+        # 尾帧暴露规划阶段的真实开销（规则路线为全 0，LLM 路线为真实计量）
+        yield sse_event("reasoning", build_metrics_event(agent_run))
+
+        # 落库必须在 done 之前完成，否则用户立刻追问时下一轮读不到本轮历史
+        try:
+            msg_id = await persist_message(curr.id, input_text, full_out)
+        except Exception as exc:
+            logger.error(f"[Backend] 消息落库失败: {exc}")
+            msg_id = None
+
         yield sse_event("done", {})
 
-        asyncio.create_task(save_chat_history(curr.id, input_text, full_out))
+        if msg_id is not None:
+            asyncio.create_task(enrich_message(curr.id, msg_id, input_text, full_out))
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

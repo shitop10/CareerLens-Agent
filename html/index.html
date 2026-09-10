@@ -347,6 +347,34 @@
             gap: 8px;
         }
         .reasoning-body.hidden { display: none; }
+        .r-planner {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            background: var(--blue-soft);
+            color: #1d4ed8;
+            border: 1px solid #cddffb;
+        }
+        .r-planner.rule {
+            background: #f1f5f9;
+            color: #475569;
+            border-color: #e2e8f0;
+        }
+        .r-planner-note {
+            font-weight: 400;
+            color: #b45309;
+        }
+        .r-metrics {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px;
+            color: var(--muted);
+            border-top: 1px dashed var(--line);
+            padding-top: 8px;
+        }
         .r-line { display: flex; gap: 8px; align-items: flex-start; line-height: 1.6; }
         .r-dot {
             flex: 0 0 auto;
@@ -419,6 +447,11 @@
                 <div class="nav-list" id="sideModes"></div>
             </section>
             <section>
+                <div class="section-label">规划器</div>
+                <div class="mode-row" id="sidePlanners"></div>
+                <div class="agent-meta" id="plannerHint">规则路由零 token 消耗，plan 与反思均为规则产出</div>
+            </section>
+            <section>
                 <div class="section-label">历史会话</div>
                 <div class="session-list" id="sessionList">
                     <div class="session"><strong>暂无会话</strong><span class="meta">新建一个开始分析</span></div>
@@ -434,6 +467,7 @@
                 </div>
                 <div class="badges">
                     <span class="badge" id="fileBadge">0 份资料</span>
+                    <span class="badge" id="plannerBadge">规则路由</span>
                     <span class="badge" id="modeBadge">岗位匹配</span>
                 </div>
             </header>
@@ -476,6 +510,7 @@
             loggedIn: false,
             authMode: "login",
             mode: "match",
+            planner: "rule",
             currentSessionUuid: "",
             sessions: [],
             files: [],
@@ -487,6 +522,16 @@
             ["match", "岗位匹配"],
             ["resume", "简历诊断"]
         ];
+
+        const planners = [
+            ["rule", "规则路由"],
+            ["llm", "LLM 规划"]
+        ];
+
+        const plannerHints = {
+            rule: "规则路由：关键词判意图，零 token 消耗，plan 与反思均为规则产出，可复现",
+            llm: "LLM 规划：LangGraph plan→execute→reflect，模型自主选工具，失败自动回退规则路线"
+        };
 
         const prompts = {
             upload: [],
@@ -698,12 +743,22 @@
             }
         }
 
+        function renderPlanners() {
+            $("sidePlanners").innerHTML = planners.map(([key, label]) =>
+                `<button class="mode-chip ${state.planner === key ? "active" : ""}" data-planner="${key}">${label}</button>`
+            ).join("");
+            const current = planners.find(([key]) => key === state.planner) || planners[0];
+            $("plannerBadge").textContent = current[1];
+            $("plannerHint").textContent = plannerHints[state.planner] || "";
+        }
+
         function render() {
             if (!state.loggedIn) return;
             const current = modes.find(([key]) => key === state.mode) || modes[1];
             $("modeBadge").textContent = current[1];
             renderModes("sideModes", "nav-btn");
             renderModes("topModes", "mode-chip");
+            renderPlanners();
             renderMaterials();
             renderSessions();
             refreshFiles();
@@ -735,7 +790,7 @@
             panel.className = "reasoning-panel";
             const toggle = document.createElement("button");
             toggle.className = "reasoning-toggle";
-            toggle.innerHTML = `<span class="arrow open">▶</span><span>Agent 工作流</span>`;
+            toggle.innerHTML = `<span class="arrow open">▶</span><span class="r-title">Agent 工作流</span>`;
             const body = document.createElement("div");
             body.className = "reasoning-body";
             panel.appendChild(toggle);
@@ -752,6 +807,10 @@
             $("stage").scrollTop = $("stage").scrollHeight;
             return {
                 body,
+                setTitle(text) {
+                    const node = toggle.querySelector(".r-title");
+                    if (node && text) node.textContent = text;
+                },
                 setCollapsed(collapsed) {
                     open = !collapsed;
                     body.classList.toggle("hidden", collapsed);
@@ -762,7 +821,24 @@
 
         function renderReasoning(panelBody, evt) {
             const el = document.createElement("div");
-            if (evt.type === "plan") {
+            if (evt.type === "planner") {
+                el.className = "r-planner" + (evt.planner === "rule" ? " rule" : "");
+                el.textContent = "规划器：" + (evt.label || evt.planner || "未知");
+                if (evt.note) {
+                    const note = document.createElement("span");
+                    note.className = "r-planner-note";
+                    note.textContent = "｜已降级：" + evt.note;
+                    el.appendChild(note);
+                }
+            } else if (evt.type === "metrics") {
+                el.className = "r-metrics";
+                el.textContent =
+                    "规划耗时 " + (Number(evt.plan_latency_ms) || 0).toFixed(0) + "ms" +
+                    " · 规划 token " + (evt.total_tokens || 0) +
+                    " · LLM 轮次 " + (evt.llm_rounds || 0) +
+                    " · 工具 " + (evt.tool_count || 0) + " 个" +
+                    " · 历史 " + (evt.history_turns || 0) + " 轮";
+            } else if (evt.type === "plan") {
                 el.className = "r-line plan";
                 const dot = document.createElement("span");
                 dot.className = "r-dot";
@@ -834,6 +910,9 @@
                 try { payload = JSON.parse(dataStr); } catch { return; }
 
                 if (eventName === "reasoning") {
+                    if (payload.type === "planner") {
+                        thinkingCtx.setTitle("Agent 工作流 · " + (payload.label || payload.planner || ""));
+                    }
                     renderReasoning(thinkingCtx.body, payload);
                 } else if (eventName === "answer") {
                     if (!answerStarted) {
@@ -848,7 +927,8 @@
             try {
                 const res = await api("POST", "/chat", {
                     session_uuid: state.currentSessionUuid,
-                    input_text: text
+                    input_text: text,
+                    planner_mode: state.planner
                 });
                 const reader = res.body.getReader();
                 const decoder = new TextDecoder();
@@ -925,6 +1005,11 @@
             if (modeBtn) {
                 state.mode = modeBtn.dataset.mode;
                 render();
+            }
+            const plannerBtn = event.target.closest("[data-planner]");
+            if (plannerBtn) {
+                state.planner = plannerBtn.dataset.planner;
+                renderPlanners();
             }
             const promptBtn = event.target.closest("[data-prompt]");
             if (promptBtn) {
