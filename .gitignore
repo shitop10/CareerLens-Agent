@@ -8,7 +8,10 @@ __pycache__/
 CareerLens-Agent-source/
 CareerLens-Agent-source-ssh/
 _resume_temp.txt
+
+# 求职/面试类资料与个人背景文档（非项目代码与开发文档，不入库）
 面试项目介绍指南.md
 项目问答总结.md
+项目升级总结与面试讲解方案.md
 说明文档.txt
 项目总结.md
